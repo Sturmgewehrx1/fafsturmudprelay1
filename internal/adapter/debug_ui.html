@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>FAF Sturm Relay Adapter Debug</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Consolas', 'Courier New', monospace;
+      background: #0d1117;
+      color: #c9d1d9;
+      padding: 20px;
+      font-size: 14px;
+    }
+    h1 {
+      color: #58a6ff;
+      font-size: 1.3em;
+      margin-bottom: 4px;
+    }
+    .subtitle {
+      color: #8b949e;
+      font-size: 0.85em;
+      margin-bottom: 20px;
+    }
+    .section {
+      margin-bottom: 20px;
+    }
+    .section-title {
+      color: #8b949e;
+      text-transform: uppercase;
+      font-size: 0.75em;
+      letter-spacing: 0.1em;
+      margin-bottom: 8px;
+      border-bottom: 1px solid #21262d;
+      padding-bottom: 4px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    th {
+      background: #161b22;
+      color: #8b949e;
+      padding: 6px 12px;
+      text-align: left;
+      font-size: 0.85em;
+      font-weight: normal;
+    }
+    td {
+      padding: 6px 12px;
+      border-bottom: 1px solid #161b22;
+    }
+    tr:last-child td { border-bottom: none; }
+    .kv-table td:first-child {
+      color: #8b949e;
+      width: 200px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 0.8em;
+      font-weight: bold;
+    }
+    .badge-ok    { background: #1a4731; color: #56d364; }
+    .badge-err   { background: #4d1f24; color: #f85149; }
+    .badge-warn  { background: #3d2f0b; color: #e3b341; }
+    .badge-ice        { background: #0d2b4e; color: #58a6ff; }
+    .badge-relay      { background: #2d1d4e; color: #bc8cff; }
+    .badge-dedicated  { background: #2d2200; color: #e8c060; }
+    .muted { color: #484f58; }
+    .no-peers {
+      color: #8b949e;
+      font-style: italic;
+      padding: 10px 0;
+    }
+    #ts {
+      color: #484f58;
+      font-size: 0.78em;
+      margin-top: 16px;
+    }
+    .err-msg {
+      color: #f85149;
+      padding: 10px 0;
+    }
+    .btn-reconnect {
+      background: #21262d;
+      color: #58a6ff;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 3px 10px;
+      font-family: inherit;
+      font-size: 0.8em;
+      cursor: pointer;
+    }
+    .btn-reconnect:hover:not(:disabled) {
+      background: #30363d;
+      border-color: #58a6ff;
+    }
+    .btn-reconnect:active:not(:disabled) {
+      background: #0d2b4e;
+    }
+    .btn-reconnect:disabled {
+      color: #484f58;
+      border-color: #21262d;
+      cursor: default;
+    }
+  </style>
+</head>
+<body>
+  <h1>FAF Sturm Relay Adapter Debug</h1>
+  <div class="subtitle">Auto-refreshes every 2 seconds</div>
+  <div id="root">Loading…</div>
+  <div id="ts"></div>
+
+  <script>
+    const MIN_CONNECTED_MS = 120000;
+    const prevButtonEnabled = {};  // playerId → bool, tracks previous button state for change logging
+
+    function badge(cls, text) {
+      return `<span class="badge badge-${cls}">${text}</span>`;
+    }
+
+    function stateColor(connected, state) {
+      if (connected) return badge('ok', state || 'Connected');
+      if (state === 'Connecting' || state === 'Checking' || state === 'New') return badge('warn', state);
+      return badge('err', state || 'Disconnected');
+    }
+
+    function pingCell(rttMs, connected, isEstimated) {
+      if (!connected || rttMs <= 0) return '<span class="muted">–</span>';
+      if (isEstimated) return rttMs + ' ms <span class="muted">(estimated)</span>';
+      return rttMs + ' ms';
+    }
+
+    function qualityBadge(rttMs, connected, isEstimated) {
+      if (!connected || rttMs <= 0) return '<span class="muted">–</span>';
+      const est = isEstimated ? ' (estimated)' : '';
+      if (rttMs <= 200) return badge('ok', 'Good' + est);
+      if (rttMs <= 400) return badge('warn', 'Fair' + est);
+      return badge('err', 'Poor' + est);
+    }
+
+    function renderStatus(s) {
+      const relayBadge = s.relay_connected
+        ? badge('ok', 'CONNECTED')
+        : badge('err', 'DISCONNECTED');
+
+      const gpgBadge = s.gpgpnet && s.gpgpnet.connected
+        ? badge('ok', 'connected')
+        : badge('err', 'not connected');
+
+      const gameState = (s.gpgpnet && s.gpgpnet.game_state) || 'None';
+
+      let html = `
+        <div class="section">
+          <div class="section-title">Adapter</div>
+          <table class="kv-table">
+            <tr><td>Player</td><td>${escHtml(s.options.player_login)} &nbsp;<span class="muted">(ID ${s.options.player_id})</span></td></tr>
+            <tr><td>Lobby UDP Port</td><td>${s.lobby_port}</td></tr>
+            <tr><td>RPC Port</td><td>${s.options.rpc_port}</td></tr>
+            <tr><td>ICE Server Groups</td><td>${s.ice_servers_size} <span class="muted">(STUN/TURN configurations)</span></td></tr>
+            <tr><td>Dedicated Relay Server</td><td>${relayBadge}</td></tr>
+            <tr><td>GPGNet</td><td>${gpgBadge} &nbsp;<span class="muted">${escHtml(gameState)}</span></td></tr>
+          </table>
+        </div>`;
+
+      // Server sends peers sorted by addedOrder (insertion order) — do NOT re-sort client-side
+      const relays = s.relays || [];
+      html += `<div class="section">
+        <div class="section-title">Peers (${relays.length})</div>`;
+
+      if (relays.length === 0) {
+        html += `<div class="no-peers">No peers connected.</div>`;
+      } else {
+        html += `<table>
+          <thead>
+            <tr>
+              <th>Player ID</th>
+              <th></th>
+              <th>Login</th>
+              <th>Type</th>
+              <th>Protocol</th>
+              <th>Role</th>
+              <th>Ping</th>
+              <th>Quality</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>`;
+        for (const r of relays) {
+          const locType = (r.ice && r.ice.loc_cand_type) || '';
+          const remType = (r.ice && r.ice.rem_cand_type) || '';
+          const isDedicated = !!(r.ice && r.ice.dedicated);
+          const isRelayType = !isDedicated && (locType === 'relay' || remType === 'relay');
+          const candLabel = (locType && remType && locType !== 'unknown' && remType !== 'unknown')
+            ? `${locType}/${remType}` : '';
+          const typBadge = isDedicated
+            ? badge('dedicated', 'Dedicated Relay')
+            : isRelayType
+              ? badge('relay', 'TURN Relay')
+              : badge('ice', candLabel ? `P2P <span style="font-weight:normal;opacity:0.7">(${candLabel})</span>` : 'P2P');
+          const isOfferer = !!(r.ice && r.ice.offerer);
+          const role = isOfferer ? 'Initiator' : 'Responder';
+          const connected = r.ice && r.ice.connected;
+          const state = (r.ice && r.ice.state) || '?';
+          const rttMs = (r.ice && r.ice.rtt_ms) || 0;
+          // rtt_estimated: true only for NTP-based 2× one-way fallback.
+          // STUN keepalive RTT (pion/ice) and echo-based direct measurements are not estimated.
+          const rttEstimated = !!(r.ice && r.ice.rtt_estimated);
+          const stateBadge = stateColor(connected, state);
+
+          const transport = (r.ice && r.ice.transport) || '';
+          const protoBadge = transport === 'tcp'
+            ? badge('warn', 'TCP')
+            : transport === 'udp'
+              ? badge('ok', 'UDP')
+              : `<span class="muted">–</span>`;
+
+          const pid = r.remote_player_id;
+          const connectedMs = (r.ice && r.ice.connected_ms) || 0;
+          const connectedLongEnough = connected && connectedMs >= MIN_CONNECTED_MS;
+
+          // Log button state transitions for diagnostics.
+          if (connectedLongEnough !== !!prevButtonEnabled[pid]) {
+            const remainSec = connected && connectedMs < MIN_CONNECTED_MS
+              ? Math.ceil((MIN_CONNECTED_MS - connectedMs) / 1000) : 0;
+            console.log(`[Reconnect] peer=${pid} button=${connectedLongEnough ? 'ENABLED' : 'DISABLED'} connected=${connected} connected_ms=${connectedMs}` +
+              (remainSec > 0 ? ` (available in ~${remainSec}s)` : ''));
+            prevButtonEnabled[pid] = connectedLongEnough;
+          }
+
+          let reconnectLabel = 'Reconnect';
+          if (!connectedLongEnough && connected && connectedMs > 0 && connectedMs < MIN_CONNECTED_MS) {
+            const remainSec = Math.ceil((MIN_CONNECTED_MS - connectedMs) / 1000);
+            reconnectLabel = `Reconnect (${remainSec}s)`;
+          }
+          const actionCell = isDedicated
+            ? ''
+            : `<button class="btn-reconnect" onclick="reconnect(${pid})"${connectedLongEnough ? '' : ' disabled'}>${reconnectLabel}</button>`;
+
+          html += `<tr>
+            <td>${r.remote_player_id}</td>
+            <td>${actionCell}</td>
+            <td>${escHtml(r.remote_player_login)}</td>
+            <td>${typBadge}</td>
+            <td>${protoBadge}</td>
+            <td>${role}</td>
+            <td>${pingCell(rttMs, connected, rttEstimated)}</td>
+            <td>${qualityBadge(rttMs, connected, rttEstimated)}</td>
+            <td>${stateBadge}</td>
+          </tr>`;
+        }
+        html += `</tbody></table>`;
+      }
+      html += `</div>`;
+      return html;
+    }
+
+    function escHtml(s) {
+      if (!s) return '';
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    async function reconnect(playerId) {
+      delete prevButtonEnabled[playerId]; // reset so the log fires again after reconnect
+      refresh();
+      try {
+        const r = await fetch('/api/reconnect?player_id=' + playerId, {method: 'POST'});
+        if (!r.ok) throw new Error(await r.text());
+      } catch(e) {
+        alert('Reconnect failed: ' + e.message);
+      }
+      refresh();
+    }
+
+    async function refresh() {
+      try {
+        const r = await fetch('/api/status');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const s = await r.json();
+        document.getElementById('root').innerHTML = renderStatus(s);
+      } catch(e) {
+        document.getElementById('root').innerHTML =
+          `<div class="err-msg">Error loading status: ${escHtml(e.message)}</div>`;
+      }
+      document.getElementById('ts').textContent =
+        'Last update: ' + new Date().toLocaleTimeString();
+    }
+
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>
